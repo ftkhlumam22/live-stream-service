@@ -1,0 +1,39 @@
+stages:
+  - build
+  - deploy
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - name: docker:latest
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  script:
+    - echo "PORT = $PORT" >> .env
+    - echo "DB_USER = $DB_USER" >> .env
+    - echo "DB_NAME = $DB_NAME" >> .env
+    - echo "DB_PASSWORD = $DB_PASSWORD" >> .env
+    - echo "DB_HOST = $DB_HOST" >> .env
+    - echo "SECRET_KEY = $JWT_SECRET_KEY" >> .env
+    - echo "Build process!"
+    - docker build --pull -t "$CI_REGISTRY_IMAGE${tag}" .
+    - docker push "$CI_REGISTRY_IMAGE${tag}"
+    - echo "Build successfully!"
+  only: 
+    - master
+deploy:
+  stage: deploy
+  before_script:
+    - apt-get update && apt-get install sshpass -y
+    - mkdir ~/.ssh
+    - echo "StrictHostKeyChecking no" >> ~/.ssh/config
+  script:
+    - echo "Build deploy!"
+    - sshpass -p "$SSH_PASSWORD" ssh $SSH_USER@$SSH_HOST "sudo docker stop svc-auth || true"
+    - sshpass -p "$SSH_PASSWORD" ssh $SSH_USER@$SSH_HOST "sudo docker rm svc-auth || true"
+    - sshpass -p "$SSH_PASSWORD" ssh $SSH_USER@$SSH_HOST "sudo docker rmi registry.gitlab.com/jagoankurir/svc-auth:latest || true"
+    - sshpass -p "$SSH_PASSWORD" ssh $SSH_USER@$SSH_HOST "sudo docker pull registry.gitlab.com/jagoankurir/svc-auth"
+    - sshpass -p "$SSH_PASSWORD" ssh $SSH_USER@$SSH_HOST "sudo docker run -p 3001:8000 -d --network jagoankurir-network --name svc-auth registry.gitlab.com/jagoankurir/svc-auth"
+    - echo "Deploy successfully!"
+  only: 
+    - master
