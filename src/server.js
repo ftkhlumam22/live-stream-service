@@ -18,7 +18,7 @@ app.use(compression({ level: 8 }));
 // Cors Origin
 app.use(cors());
 
-app.use("/", routesApi);
+app.use("/api", routesApi);
 
 app.use((_, res) => {
   return httpResponse.notFoundResponse(res, "API not found");
