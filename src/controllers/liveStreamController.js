@@ -28,23 +28,117 @@ const getDataVideo = async (req, res) => {
   }
 };
 
+const ensureDirectoryExists = (dirPath) => {
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true }); // Buat direktori beserta sub-direktorinya jika perlu
+  }
+};
+
 const uploadVideoData = async (req, res) => {
-  const { originalname, buffer } = req.file;
-
-  // Ganti spasi dengan underscore pada nama file
-  const sanitizedFileName = originalname.replace(/\s+/g, "_");
-
-  minioClient.putObject(
-    CONFIG.MINIO.BUCKET_NAME,
-    sanitizedFileName,
-    buffer,
-    (err, etag) => {
-      if (err) {
-        return httpResponse.badRequestResponse(res, "Failed to upload video");
-      }
-      return httpResponse.successResponse(res, "Video uploaded successfully");
-    }
+  const { chunkIndex, totalChunks, filename } = req.body;
+  const { buffer } = req.file;
+  const sanitizedFileName = filename.replace(/\s+/g, "_");
+  const uploadsDir = path.join("uploads"); // Path untuk direktori uploads
+  const chunkFilePath = path.join(
+    uploadsDir,
+    `${sanitizedFileName}.part${chunkIndex}`
   );
+
+  // Pastikan direktori uploads ada
+  ensureDirectoryExists(uploadsDir);
+
+  // Simpan chunk ke sistem file lokal
+  fs.writeFile(chunkFilePath, buffer, async (err) => {
+    if (err) {
+      console.error("Error saving chunk:", err);
+      return res.status(400).json({ message: "Failed to Upload Video Chunk" });
+    }
+
+    // Jika semua chunk sudah di-upload
+    if (parseInt(chunkIndex) === parseInt(totalChunks) - 1) {
+      const finalFilePath = path.join(uploadsDir, sanitizedFileName); // File akhir untuk digabungkan
+      // Menggabungkan file chunks ke file akhir
+      const writeStream = fs.createWriteStream(finalFilePath);
+      const mergeChunks = async () => {
+        for (let i = 0; i < totalChunks; i++) {
+          const chunkFileName = `${sanitizedFileName}.part${i}`;
+          const chunkPath = path.join(uploadsDir, chunkFileName); // Pastikan path benar
+          // Membaca dan menulis chunk ke file akhir
+          await new Promise((resolve, reject) => {
+            const readStream = fs.createReadStream(chunkPath);
+            readStream.pipe(writeStream, { end: false });
+            readStream.on("end", () => {
+              console.log(
+                `Chunk ${chunkFileName} has been piped to final file.`
+              );
+              resolve(); // Resolving the promise when done
+            });
+            readStream.on("error", (error) => {
+              reject(error);
+            });
+          });
+        }
+        writeStream.end(); // Menutup stream setelah semua chunk selesai di-pipe
+      };
+
+      mergeChunks()
+        .then(() => {
+          // Setelah gabungan selesai, upload file ke MinIO
+          minioClient.putObject(
+            CONFIG.MINIO.BUCKET_NAME,
+            sanitizedFileName,
+            fs.createReadStream(finalFilePath),
+            {
+              "Content-Type": "video/mp4", // Tentukan Content-Type yang sesuai
+            },
+            (err) => {
+              // Hapus chunks lokal setelah upload
+              for (let i = 0; i < totalChunks; i++) {
+                const chunkFileName = `${sanitizedFileName}.part${i}`;
+                const chunkPath = path.join(uploadsDir, chunkFileName);
+                fs.unlink(chunkPath, (unlinkErr) => {
+                  if (unlinkErr) {
+                    console.error(
+                      `Error deleting chunk ${chunkFileName}:`,
+                      unlinkErr
+                    );
+                  } else {
+                    console.log(`Chunk ${chunkFileName} deleted successfully.`);
+                  }
+                });
+              }
+              const fileLocalName = path.join(uploadsDir, sanitizedFileName);
+
+              fs.unlink(fileLocalName, (unlinkErr) => {
+                if (unlinkErr) {
+                  console.error(
+                    `Error deleting file ${fileLocalName}:`,
+                    unlinkErr
+                  );
+                } else {
+                  console.log(`File ${fileLocalName} deleted successfully.`);
+                }
+              });
+              if (err) {
+                return res
+                  .status(500)
+                  .json({ message: "Failed to upload final merged file" });
+              }
+              console.log("File successfully uploaded to MinIO!");
+              return res.status(200).json({
+                message: "All chunks uploaded and merged successfully!",
+              });
+            }
+          );
+        })
+        .catch((error) => {
+          console.error("Error merging chunks:", error);
+          return res.status(500).json({ message: "Failed to merge chunks." });
+        });
+    } else {
+      return res.status(200).json({ message: "Chunk uploaded successfully" });
+    }
+  });
 };
 
 const startStreamYoutube = async (req, res) => {
